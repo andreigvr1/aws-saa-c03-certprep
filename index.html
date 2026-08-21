@@ -203,6 +203,28 @@
   .kp.good li::before { content: "✓"; color: var(--good); font-weight: 800; }
   .kp.warn li::before { content: "!"; color: var(--accent); font-weight: 800; }
 
+  /* ---------- structured study-note sections (replaces one long prose block) ---------- */
+  .notesecs { display: flex; flex-direction: column; gap: 10px; }
+  .notesec { background: var(--surface-2); border-radius: 10px; padding: 12px 14px; }
+  .notesec-h { font-family: var(--font-mono); font-size: .72rem; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--accent); font-weight: 700; margin-bottom: 5px; }
+  .notesec-b { font-size: .92rem; }
+  .notesec-b p { margin: 0 0 8px; max-width: 62ch; }
+  .notesec-b p:last-child { margin-bottom: 0; }
+  .notesec-b ul { margin: 4px 0 8px; padding-left: 20px; }
+
+  /* ---------- clamp / show-more for long lists ---------- */
+  .clampbox { position: relative; max-height: 300px; overflow: hidden; }
+  .clampbox.expanded { max-height: none; }
+  .clampbox:not(.expanded)::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 64px;
+    background: linear-gradient(to bottom, transparent, var(--surface));
+  }
+  .clamp-toggle { margin-top: 10px; }
+
+  /* ---------- weakness stat pill (used in Learn / Services / Confusables lists) ---------- */
+  .wstat { font-family: var(--font-mono); font-size: .74rem; font-weight: 700; text-align: right; white-space: nowrap; }
+
   /* ---------- confusables ---------- */
   .cmp-table { width: 100%; border-collapse: collapse; font-size: .85rem; }
   .cmp-table th, .cmp-table td { text-align: left; padding: 9px 11px; border-bottom: 1px solid var(--line-2); vertical-align: top; }
@@ -237,7 +259,6 @@
   .trap { display: flex; gap: 9px; align-items: flex-start; margin-top: 12px; background: var(--surface-2);
     border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px 12px; font-size: .88rem; }
   .trap .lbl { font-weight: 750; color: var(--accent); white-space: nowrap; }
-  .cmp-focus { box-shadow: var(--ring); border-color: var(--accent) !important; }
 
   @media (max-width: 560px) {
     .tiles { grid-template-columns: 1fr 1fr; }
@@ -311,6 +332,28 @@ function weakTopics() {
 }
 function pct(x) { return x === null ? "—" : Math.round(x * 100) + "%"; }
 
+/* ------------------------------------------------------------------ weakest-first ranking */
+// Score is 0..1 accuracy, or -1 for "not attempted yet" (sorted first — unknown is treated as highest priority).
+function topicWeakness(t) {
+  const a = topicAcc(t.id);
+  return a === null ? -1 : a;
+}
+function serviceWeakness(s) {
+  const related = PACK.topics.filter(t => (t.services || []).some(nm => serviceNameToId(nm) === s.id));
+  let seen = 0, correct = 0;
+  related.forEach(t => (qsByTopic[t.id] || []).forEach(q => { const a = aStat(q.id); seen += a.seen; correct += a.correct; }));
+  return seen ? correct / seen : -1;
+}
+function comparisonWeakness(c) {
+  const qs = PACK.questions.filter(q => q.confusableId === c.id);
+  let seen = 0, correct = 0;
+  qs.forEach(q => { const a = aStat(q.id); seen += a.seen; correct += a.correct; });
+  return seen ? correct / seen : -1;
+}
+function byWeakness(scoreFn) { return (a, b) => scoreFn(a) - scoreFn(b); }
+function wpct(score) { return score < 0 ? "not started" : pct(score); }
+function weaknessColor(score) { return score < 0 ? "var(--ink-3)" : score < 0.6 ? "var(--bad)" : score < 0.8 ? "var(--accent)" : "var(--good)"; }
+
 /* ------------------------------------------------------------------ tiny markdown */
 function esc(s) { return String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
 function inline(s) { return esc(s).replace(/`([^`]+)`/g, '<code class="inline">$1</code>').replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>"); }
@@ -326,6 +369,29 @@ function md(text) {
   }
   return html;
 }
+// Study notes are written as "**Lead phrase.** rest of paragraph" per idea, separated by
+// blank lines. Instead of rendering that as one long flowing block, split on the blank
+// lines and promote each lead phrase to its own small heading — turns a wall of text into
+// a stack of scannable mini-sections.
+function renderNoteSections(text) {
+  const blocks = String(text).split(/\n\n+/);
+  let html = '<div class="notesecs">';
+  for (const b of blocks) {
+    const m = b.match(/^\*\*([^*]+)\*\*[:.]?\s*([\s\S]*)$/);
+    if (m && m[2].trim()) {
+      html += '<div class="notesec"><div class="notesec-h">' + inline(m[1]) + '</div><div class="notesec-b">' + md(m[2]) + '</div></div>';
+    } else {
+      html += '<div class="notesec"><div class="notesec-b">' + md(b) + '</div></div>';
+    }
+  }
+  html += '</div>';
+  return html;
+}
+function toggleClamp(id, btn) {
+  const el = document.getElementById(id);
+  const exp = el.classList.toggle("expanded");
+  btn.textContent = exp ? "Show less" : btn.dataset.label;
+}
 
 /* ------------------------------------------------------------------ router */
 const VIEWS = [["home", "Home"], ["practice", "Practice"], ["learn", "Learn"], ["services", "Services"], ["confusables", "Confusables"], ["progress", "Progress"]];
@@ -339,7 +405,7 @@ function render() {
   if (v === "practice") return renderPractice();
   if (v === "learn") return route.params.topic ? renderTopic(route.params.topic) : renderLearn();
   if (v === "services") return route.params.service ? renderServiceDetail(route.params.service) : (route.params.pattern ? renderPatternDetail(route.params.pattern) : renderServices());
-  if (v === "confusables") return renderConfusables();
+  if (v === "confusables") return route.params.cmp ? renderComparisonDetail(route.params.cmp) : renderConfusables();
   if (v === "progress") return renderProgress();
 }
 
@@ -480,7 +546,7 @@ function renderQuiz() {
     }
     h += '</div>';
     h += '<div class="btn-row" style="margin-top:16px"><button class="btn primary" id="nextBtn">' + (quiz.idx + 1 < quiz.ids.length ? "Next question" : "See results") + '</button>' +
-      (cmp ? '<button class="btn" onclick="go(\'confusables\',{focus:\'' + cmp.id + '\'})">Compare: ' + esc(cmp.title) + '</button>' : "") +
+      (cmp ? '<button class="btn" onclick="go(\'confusables\',{cmp:\'' + cmp.id + '\'})">Compare: ' + esc(cmp.title) + '</button>' : "") +
       '<button class="btn ghost" onclick="go(\'learn\',{topic:\'' + q.topicId + '\'})">Read the topic</button></div>';
   } else {
     h += '<div class="btn-row" style="margin-top:16px"><button class="btn primary" id="submitBtn"' + (picks.length ? "" : " disabled") + '>Submit</button>' +
@@ -537,10 +603,11 @@ function renderResults() {
 
 /* ------------------------------------------------------------------ LEARN */
 function renderLearn() {
-  let h = '<div class="stack"><div><div class="eyebrow">Study notes</div><h1 style="margin:4px 0 0">' + PACK.topics.length + ' topics</h1></div>';
+  let h = '<div class="stack"><div><div class="eyebrow">Study notes</div><h1 style="margin:4px 0 0">' + PACK.topics.length + ' topics</h1>' +
+    '<p class="muted" style="margin:6px 0 0;font-size:.85rem">Sorted weakest first within each domain — not-yet-started topics lead, then lowest accuracy.</p></div>';
   PACK.domains.forEach(d => {
     h += '<div><div class="group-h ' + d.id + '"><span class="dot" style="background:var(--dc)"></span><h2>' + esc(d.name) + '</h2><span class="w">' + d.weight + '% · Task ' + shortTasks(d.id) + '</span></div><div class="tlist">';
-    PACK.topics.filter(t => t.domainId === d.id).forEach(t => { h += topicItem(t); });
+    PACK.topics.filter(t => t.domainId === d.id).sort(byWeakness(topicWeakness)).forEach(t => { h += topicItem(t, "acc"); });
     h += '</div></div>';
   });
   h += '</div>';
@@ -569,13 +636,20 @@ function renderTopic(id) {
     '<h1 style="margin:2px 0 4px">' + esc(t.name) + '</h1>' +
     '<p class="muted" style="margin:0 0 14px;max-width:64ch">' + esc(t.summary || "") + '</p>' +
     (t.inShort ? '<div class="inshort" style="margin-bottom:16px"><span class="lbl">In short</span><span>' + inline(t.inShort) + '</span></div>' : "") +
-    '<div class="learn-note">' + md(t.learn) + '</div>' +
+    (String(t.learn || "").length > 700
+      ? '<div class="clampbox" id="note-' + t.id + '">' + renderNoteSections(t.learn) + '</div>' +
+        '<button class="btn ghost sm clamp-toggle" data-label="Show full study note" onclick="toggleClamp(\'note-' + t.id + '\',this)">Show full study note</button>'
+      : renderNoteSections(t.learn)) +
     (t.triggers && t.triggers.length
       ? '<div class="eyebrow" style="margin:18px 0 4px">How to decide — exam triggers</div><div class="triggers">' +
         t.triggers.map(tr => '<div class="trigger"><span class="when">When you see <b>' + esc(tr.when) + '</b></span><span class="arrow">→</span><span class="pick">' + esc(tr.pick) + '</span></div>').join("") +
         '</div>'
       : "") +
-    '<div class="eyebrow" style="margin:18px 0 9px">Key points</div><ul class="kp">' + (t.keyPoints || []).map(k => '<li><span>' + inline(k) + '</span></li>').join("") + '</ul>' +
+    '<div class="eyebrow" style="margin:18px 0 9px">Key points' + ((t.keyPoints || []).length ? ' (' + t.keyPoints.length + ')' : '') + '</div>' +
+    ((t.keyPoints || []).length > 7
+      ? '<div class="clampbox" id="kp-' + t.id + '"><ul class="kp">' + t.keyPoints.map(k => '<li><span>' + inline(k) + '</span></li>').join("") + '</ul></div>' +
+        '<button class="btn ghost sm clamp-toggle" data-label="Show all ' + t.keyPoints.length + ' key points" onclick="toggleClamp(\'kp-' + t.id + '\',this)">Show all ' + t.keyPoints.length + ' key points</button>'
+      : '<ul class="kp">' + (t.keyPoints || []).map(k => '<li><span>' + inline(k) + '</span></li>').join("") + '</ul>') +
     '<div class="eyebrow" style="margin:18px 0 8px">Services</div><div class="chips">' + (t.services || []).map(s => {
       const sid = serviceNameToId(s);
       return sid ? '<button class="chip" style="cursor:pointer" onclick="go(\'services\',{service:\'' + sid + '\'})">' + esc(s) + '</button>' : '<span class="chip">' + esc(s) + '</span>';
@@ -590,38 +664,47 @@ function toggleReviewed(id) { S.reviewed[id] = !S.reviewed[id]; save(); renderTo
 
 /* ------------------------------------------------------------------ CONFUSABLES */
 let cmpFilter = "all";
+function cmpListItem(c) {
+  const w = comparisonWeakness(c);
+  return '<button class="titem" onclick="go(\'confusables\',{cmp:\'' + c.id + '\'})">' +
+    '<span class="dot" style="background:var(--accent)"></span>' +
+    '<span class="tname">' + esc(c.title) + '</span>' +
+    '<span class="tsum">' + c.items.map(esc).join(" vs. ") + '</span>' +
+    '<span class="wstat" style="color:' + weaknessColor(w) + '">' + wpct(w) + '</span></button>';
+}
 function renderConfusables() {
-  const focus = route.params && route.params.focus;
-  if (focus) cmpFilter = "all";
-  const list = (PACK.comparisons || []).filter(c => cmpFilter === "all" || c.domainId === cmpFilter);
+  const list = (PACK.comparisons || []).filter(c => cmpFilter === "all" || c.domainId === cmpFilter).sort(byWeakness(comparisonWeakness));
   let h = '<div class="stack"><div><div class="eyebrow">Look-alikes the exam loves</div><h1 style="margin:4px 0 10px">Confusables</h1>' +
+    '<p class="muted" style="margin:0 0 12px;font-size:.85rem">Sorted weakest first, based on how you\'ve scored on questions that trip on each mix-up.</p>' +
     '<div class="filterbar"><button aria-pressed="' + (cmpFilter === "all") + '" onclick="setCmp(\'all\')">All</button>' +
     PACK.domains.map(d => '<button aria-pressed="' + (cmpFilter === d.id) + '" onclick="setCmp(\'' + d.id + '\')">' + esc(d.name.replace("Design ", "")) + '</button>').join("") + '</div></div>';
-  list.forEach(c => {
-    h += '<div class="card ' + c.domainId + '" id="cmp-' + c.id + '"><h2 style="margin-bottom:12px">' + esc(c.title) + '</h2>' +
-      '<div class="cmp-scroll"><table class="cmp-table"><thead><tr><th></th>' + c.items.map(i => '<th>' + esc(i) + '</th>').join("") + '</tr></thead><tbody>' +
-      c.rows.map(r => '<tr><th>' + esc(r.label) + '</th>' + r.values.map(v => '<td>' + inline(v) + '</td>').join("") + '</tr>').join("") +
-      '</tbody></table></div>' +
-      '<div class="bottomline"><b>Bottom line —</b> ' + inline(c.bottomLine) + '</div></div>';
-  });
+  h += '<div class="tlist">' + list.map(cmpListItem).join("") + '</div>';
   if (!list.length) h += '<div class="empty">No confusables in this domain.</div>';
   h += '</div>';
   viewEl.innerHTML = h;
-  if (focus) setTimeout(() => {
-    const el = document.getElementById("cmp-" + focus);
-    if (el) { el.classList.add("cmp-focus"); el.scrollIntoView({ behavior: "smooth", block: "center" }); }
-  }, 0);
 }
 function setCmp(f) { cmpFilter = f; route.params = {}; renderConfusables(); }
+function renderComparisonDetail(id) {
+  const c = (PACK.comparisons || []).find(x => x.id === id); if (!c) return renderConfusables();
+  let h = '<div class="stack">' +
+    '<button class="btn ghost sm" style="align-self:flex-start" onclick="go(\'confusables\')">← Confusables</button>' +
+    '<div class="card ' + c.domainId + '"><h1 style="margin:4px 0 12px">' + esc(c.title) + '</h1>' +
+    '<div class="cmp-scroll"><table class="cmp-table"><thead><tr><th></th>' + c.items.map(i => '<th>' + esc(i) + '</th>').join("") + '</tr></thead><tbody>' +
+    c.rows.map(r => '<tr><th>' + esc(r.label) + '</th>' + r.values.map(v => '<td>' + inline(v) + '</td>').join("") + '</tr>').join("") +
+    '</tbody></table></div>' +
+    '<div class="bottomline"><b>Bottom line —</b> ' + inline(c.bottomLine) + '</div></div></div>';
+  viewEl.innerHTML = h;
+}
 
 /* ------------------------------------------------------------------ SERVICES */
 let svcFilter = "all";
 function svcListItem(s) {
+  const w = serviceWeakness(s);
   return '<button class="titem" onclick="go(\'services\',{service:\'' + s.id + '\'})">' +
     '<span class="dot" style="background:var(--accent)"></span>' +
     '<span class="tname">' + esc(s.name) + '</span>' +
     '<span class="tsum">' + esc(s.oneLiner) + '</span>' +
-    '<span class="stat">→</span></button>';
+    '<span class="wstat" style="color:' + weaknessColor(w) + '">' + wpct(w) + '</span></button>';
 }
 function patternListItem(p) {
   return '<button class="titem" onclick="go(\'services\',{pattern:\'' + p.id + '\'})">' +
@@ -633,8 +716,9 @@ function patternListItem(p) {
 function renderServices() {
   const all = PACK.services || [];
   const cats = [...new Set(all.map(s => s.category))];
-  const list = all.filter(s => svcFilter === "all" || s.category === svcFilter);
+  const list = all.filter(s => svcFilter === "all" || s.category === svcFilter).sort(byWeakness(serviceWeakness));
   let h = '<div class="stack"><div><div class="eyebrow">What to use and why</div><h1 style="margin:4px 0 10px">' + all.length + ' AWS services</h1>' +
+    '<p class="muted" style="margin:0 0 12px;font-size:.85rem">Sorted weakest first, based on how you\'ve scored on questions touching each service.</p>' +
     '<div class="filterbar"><button aria-pressed="' + (svcFilter === "all") + '" onclick="setSvc(\'all\')">All<\/button>' +
     cats.map(c => '<button aria-pressed="' + (svcFilter === c) + '" onclick="setSvc(\'' + c + '\')">' + esc(c) + '<\/button>').join("") + '</div></div>';
   h += '<div class="tlist">' + list.map(svcListItem).join("") + '</div>';
@@ -677,7 +761,7 @@ function renderServiceDetail(id) {
         return '<div class="card" style="padding:14px">' +
           '<div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline">' +
           '<b>' + esc(d.service) + '</b>' +
-          (cmp ? '<button class="btn ghost sm" onclick="go(\'confusables\',{focus:\'' + cmp.id + '\'})">Compare →</button>' : '') +
+          (cmp ? '<button class="btn ghost sm" onclick="go(\'confusables\',{cmp:\'' + cmp.id + '\'})">Compare →</button>' : '') +
           '</div><p class="muted" style="margin:6px 0 0">' + inline(d.note) + '</p></div>';
       }).join("") + '</div>';
   }
