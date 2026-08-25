@@ -951,7 +951,20 @@ function renderPatternDetail(id) {
 /* ------------------------------------------------------------------ PROGRESS */
 function renderProgress() {
   const oa = overallAcc();
-  let h = '<div class="stack"><div class="card hero"><div class="eyebrow">Your progress</div>' +
+  let h = '<div class="stack">';
+
+  const fsLinked = !!fsHandle, fsName = fsHandle ? (fsHandle.name || "certprep-progress.json") : null, fsSupported = fsSyncSupported();
+  h += '<div class="card" style="border-color:var(--accent)"><div class="eyebrow">Local file sync — for Claude</div>' +
+    (fsLinked
+      ? '<p style="font-size:.85rem;margin:10px 0 10px">Linked to <code class="inline">' + esc(fsName) + '</code>' + (S.fsLastSync ? ' · last synced ' + new Date(S.fsLastSync).toLocaleTimeString() : ' · not yet synced') + '</p>' +
+        (S.fsLastError ? '<p style="font-size:.83rem;margin:0 0 10px;color:var(--bad)">⚠ Last sync failed: ' + esc(S.fsLastError) + '</p>' : '') +
+        '<div class="btn-row"><button class="btn primary sm" onclick="syncLocalFile()">Sync now</button><button class="btn ghost sm" onclick="unlinkLocalFile()">Unlink</button></div>'
+      : fsSupported
+        ? '<p class="muted" style="font-size:.88rem;margin:10px 0 12px">Link a local JSON file once and every answer is written straight to it — Claude can read your history from disk, no copy/paste. Needs a normal Chrome/Edge tab (GitHub Pages or a locally-served copy) — not the sandboxed claude.ai artifact view.</p><button class="btn primary sm" onclick="linkLocalFile()">Link a local file…</button>'
+        : '<p class="muted" style="font-size:.85rem;margin:10px 0 0">Not supported in this browser/view — use "Generate report" further down instead.</p>') +
+    '</div>';
+
+  h += '<div class="card hero"><div class="eyebrow">Your progress</div>' +
     '<div class="tiles" style="margin-top:12px">' +
       tile(totalSeen() + '<span class="muted" style="font-size:1rem">/' + PACK.questions.length + '</span>', "Questions seen") +
       tile(oa === null ? "—" : pct(oa), "Overall accuracy") +
@@ -977,18 +990,6 @@ function renderProgress() {
       '<span class="stat" style="color:' + (a === null ? 'var(--ink-3)' : a < 0.6 ? 'var(--bad)' : a < 0.8 ? 'var(--accent)' : 'var(--good)') + '">' + pct(a) + '</span></button>';
   });
   h += '</div></div>';
-
-  const fsLinked = !!fsHandle, fsName = fsHandle ? (fsHandle.name || "certprep-progress.json") : null, fsSupported = fsSyncSupported();
-  h += '<div class="card"><div class="eyebrow">Local file sync (auto, no copy/paste)</div>' +
-    '<p class="muted" style="font-size:.88rem;margin:10px 0 12px">Link a local JSON file once and every answer you submit is written straight to it — Claude can read your test history directly from disk any time, no copy/paste needed. Needs desktop Chrome or Edge in a normal tab (the GitHub Pages link, or a locally-served copy) — this does not work inside the Claude artifact view.</p>' +
-    (fsLinked
-      ? '<p style="font-size:.85rem;margin:0 0 10px">Linked to <code class="inline">' + esc(fsName) + '</code>' + (S.fsLastSync ? ' · last synced ' + new Date(S.fsLastSync).toLocaleTimeString() : ' · not yet synced') + '</p>' +
-        (S.fsLastError ? '<p style="font-size:.83rem;margin:0 0 10px;color:var(--bad)">⚠ Last sync failed: ' + esc(S.fsLastError) + '</p>' : '') +
-        '<div class="btn-row"><button class="btn sm" onclick="syncLocalFile()">Sync now</button><button class="btn ghost sm" onclick="unlinkLocalFile()">Unlink</button></div>'
-      : fsSupported
-        ? '<button class="btn sm" onclick="linkLocalFile()">Link a local file…</button>'
-        : '<p class="muted" style="font-size:.8rem;margin:0">Not supported in this browser/view — use "Generate report" below instead.</p>') +
-    '</div>';
 
   h += '<div class="card"><div class="eyebrow">Weak points for Claude</div>' +
     '<p class="muted" style="font-size:.88rem;margin:10px 0 12px">Generate a report of your domain/topic/service/confusable accuracy and currently-missed questions, then paste it to Claude in your chat — it can spot patterns (a whole domain, a specific service, or a pair of services you keep confusing) and build a drill for you.</p>' +
