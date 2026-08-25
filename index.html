@@ -296,10 +296,11 @@ const PACK = {"domains":[{"id":"d1","name":"Design Secure Architectures","weight
 
 /* ------------------------------------------------------------------ state */
 const SKEY = "certprep.saa.v1";
-const DEFAULT = { attempts: {}, reviewed: {}, lastScope: "all", lastCount: "20", focusWeak: false };
+const DEFAULT = { attempts: {}, reviewed: {}, lastScope: "all", lastCount: "20", focusWeak: false, fsLastSync: null };
 let S = load();
 function load() { try { return Object.assign({}, DEFAULT, JSON.parse(localStorage.getItem(SKEY) || "{}")); } catch { return Object.assign({}, DEFAULT); } }
-function save() { try { localStorage.setItem(SKEY, JSON.stringify(S)); } catch {} }
+function persistLocal() { try { localStorage.setItem(SKEY, JSON.stringify(S)); } catch {} }
+function save() { persistLocal(); syncLocalFile(true); }
 
 const byId = {};
 PACK.questions.forEach(q => byId[q.id] = q);
@@ -361,6 +362,141 @@ function comparisonWeakness(c) {
 function byWeakness(scoreFn) { return (a, b) => scoreFn(a) - scoreFn(b); }
 function wpct(score) { return score < 0 ? "not started" : pct(score); }
 function weaknessColor(score) { return score < 0 ? "var(--ink-3)" : score < 0.6 ? "var(--bad)" : score < 0.8 ? "var(--accent)" : "var(--good)"; }
+
+/* ------------------------------------------------------------------ Claude report export */
+function attemptedServices() { return (PACK.services || []).map(s => ({ s, w: serviceWeakness(s) })).filter(x => x.w >= 0); }
+function attemptedComparisons() { return (PACK.comparisons || []).map(c => ({ c, w: comparisonWeakness(c) })).filter(x => x.w >= 0); }
+function missedQuestions() {
+  return PACK.questions
+    .map(q => ({ q, a: aStat(q.id) }))
+    .filter(x => x.a.seen > 0 && x.a.correct < x.a.seen)
+    .sort((x, y) => (x.a.correct / x.a.seen) - (y.a.correct / y.a.seen));
+}
+function buildClaudeReport() {
+  return {
+    generatedAt: new Date().toISOString(),
+    pack: { id: PACK.id, version: PACK.version },
+    overall: { questionsSeen: totalSeen(), totalQuestions: PACK.questions.length, accuracy: overallAcc(), totalAnswers: totalAttempts() },
+    byDomain: PACK.domains.map(d => ({
+      id: d.id, name: d.name, weightPct: d.weight, accuracy: domainAcc(d.id),
+      seen: seenCount(qsByDomain[d.id] || []), total: (qsByDomain[d.id] || []).length
+    })),
+    byTopicWeakestFirst: PACK.topics.map(t => ({
+      id: t.id, name: t.name, domainId: t.domainId, accuracy: topicAcc(t.id),
+      seen: seenCount(qsByTopic[t.id] || []), total: (qsByTopic[t.id] || []).length
+    })).sort((a, b) => (a.accuracy === null ? 2 : a.accuracy) - (b.accuracy === null ? 2 : b.accuracy)),
+    weakServicesAttemptedOnly: attemptedServices().sort((a, b) => a.w - b.w)
+      .map(x => ({ id: x.s.id, name: x.s.name, category: x.s.category, accuracy: x.w })),
+    weakConfusablesAttemptedOnly: attemptedComparisons().sort((a, b) => a.w - b.w)
+      .map(x => ({ id: x.c.id, title: x.c.title, items: x.c.items, accuracy: x.w })),
+    currentlyMissedQuestions: missedQuestions().map(x => ({
+      id: x.q.id, domainId: x.q.domainId, topicId: x.q.topicId, confusableId: x.q.confusableId || null,
+      tags: x.q.tags || [], timesSeen: x.a.seen, timesCorrect: x.a.correct,
+      stem: x.q.stem.length > 240 ? x.q.stem.slice(0, 240) + "…" : x.q.stem
+    })),
+  };
+}
+function renderClaudeReport() {
+  const json = JSON.stringify(buildClaudeReport(), null, 2);
+  const box = document.getElementById("claudeReportBox");
+  if (!box) return;
+  box.style.display = "block";
+  const ta = document.getElementById("claudeReportText");
+  ta.value = json;
+  ta.focus(); ta.select();
+  const status = document.getElementById("claudeReportStatus");
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(json).then(
+      () => { status.textContent = "Copied to clipboard — paste it into your chat with Claude."; },
+      () => { status.textContent = "Text is selected below — press Ctrl+C / Cmd+C to copy, then paste it into your chat with Claude."; }
+    );
+  } else {
+    status.textContent = "Text is selected below — press Ctrl+C / Cmd+C to copy, then paste it into your chat with Claude.";
+  }
+}
+
+/* ------------------------------------------------------------------ local file sync (File System Access API)
+   Desktop Chrome/Edge only, and only in a real top-level tab (GitHub Pages copy or a locally-served copy) —
+   the claude.ai artifact view runs sandboxed and does not expose this API. Writes buildClaudeReport() straight
+   to a file the user picks once, so it can be read directly from disk without any copy/paste step. */
+let fsHandle = null;
+const FS_DB = "certprep-fs", FS_STORE = "handles", FS_KEY = "progressFile";
+function fsSyncSupported() { return typeof window.showSaveFilePicker === "function"; }
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(FS_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(FS_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbSet(key, val) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(FS_STORE, "readwrite");
+    tx.objectStore(FS_STORE).put(val, key);
+    tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error);
+  });
+}
+async function idbGet(key) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(FS_STORE, "readonly");
+    const req = tx.objectStore(FS_STORE).get(key);
+    req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error);
+  });
+}
+async function idbDel(key) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(FS_STORE, "readwrite");
+    tx.objectStore(FS_STORE).delete(key);
+    tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error);
+  });
+}
+async function ensureFilePermission(handle) {
+  const opts = { mode: "readwrite" };
+  if ((await handle.queryPermission(opts)) === "granted") return true;
+  if ((await handle.requestPermission(opts)) === "granted") return true;
+  return false;
+}
+async function linkLocalFile() {
+  if (!fsSyncSupported()) {
+    alert("This needs desktop Chrome or Edge, opened as a normal browser tab (not the Claude artifact view). Try the GitHub Pages link or a locally-served copy of this file, or use \"Generate report\" and paste it to Claude instead.");
+    return;
+  }
+  try {
+    fsHandle = await window.showSaveFilePicker({
+      suggestedName: "certprep-progress.json",
+      types: [{ description: "JSON", accept: { "application/json": [".json"] } }],
+    });
+    await idbSet(FS_KEY, fsHandle);
+    await syncLocalFile();
+  } catch (e) { /* user cancelled the picker */ }
+  if (route.view === "progress") go("progress");
+}
+async function unlinkLocalFile() {
+  fsHandle = null;
+  try { await idbDel(FS_KEY); } catch {}
+  if (route.view === "progress") go("progress");
+}
+async function syncLocalFile(silent) {
+  if (!fsHandle) { try { fsHandle = await idbGet(FS_KEY); } catch {} }
+  if (!fsHandle) return false;
+  try {
+    if (!(await ensureFilePermission(fsHandle))) return false;
+    const writable = await fsHandle.createWritable();
+    await writable.write(JSON.stringify(buildClaudeReport(), null, 2));
+    await writable.close();
+    S.fsLastSync = Date.now(); persistLocal();
+    if (!silent && route.view === "progress") go("progress");
+    return true;
+  } catch (e) { return false; }
+}
+(async function initLocalFileLink() {
+  if (!fsSyncSupported()) return;
+  try { fsHandle = await idbGet(FS_KEY); } catch {}
+})();
 
 /* ------------------------------------------------------------------ tiny markdown */
 function esc(s) { return String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
@@ -828,9 +964,29 @@ function renderProgress() {
   });
   h += '</div></div>';
 
-  h += '<div class="card" style="text-align:center"><p class="muted" style="font-size:.85rem;margin:0 0 12px">Progress is stored only in this browser.</p><button class="btn ghost sm" onclick="resetAll()">Reset all progress</button></div>';
+  const fsLinked = !!fsHandle, fsName = fsHandle ? (fsHandle.name || "certprep-progress.json") : null, fsSupported = fsSyncSupported();
+  h += '<div class="card"><div class="eyebrow">Local file sync (auto, no copy/paste)</div>' +
+    '<p class="muted" style="font-size:.88rem;margin:10px 0 12px">Link a local JSON file once and every answer you submit is written straight to it — Claude can read your test history directly from disk any time, no copy/paste needed. Needs desktop Chrome or Edge in a normal tab (the GitHub Pages link, or a locally-served copy) — this does not work inside the Claude artifact view.</p>' +
+    (fsLinked
+      ? '<p style="font-size:.85rem;margin:0 0 10px">Linked to <code class="inline">' + esc(fsName) + '</code>' + (S.fsLastSync ? ' · last synced ' + new Date(S.fsLastSync).toLocaleTimeString() : ' · not yet synced') + '</p>' +
+        '<div class="btn-row"><button class="btn sm" onclick="syncLocalFile()">Sync now</button><button class="btn ghost sm" onclick="unlinkLocalFile()">Unlink</button></div>'
+      : fsSupported
+        ? '<button class="btn sm" onclick="linkLocalFile()">Link a local file…</button>'
+        : '<p class="muted" style="font-size:.8rem;margin:0">Not supported in this browser/view — use "Generate report" below instead.</p>') +
+    '</div>';
+
+  h += '<div class="card"><div class="eyebrow">Weak points for Claude</div>' +
+    '<p class="muted" style="font-size:.88rem;margin:10px 0 12px">Generate a report of your domain/topic/service/confusable accuracy and currently-missed questions, then paste it to Claude in your chat — it can spot patterns (a whole domain, a specific service, or a pair of services you keep confusing) and build a drill for you.</p>' +
+    '<button class="btn primary sm" onclick="renderClaudeReport()">Generate report</button>' +
+    '<div id="claudeReportBox" style="display:none;margin-top:12px">' +
+      '<p id="claudeReportStatus" class="muted" style="font-size:.82rem;margin:0 0 8px"></p>' +
+      '<textarea id="claudeReportText" readonly style="width:100%;min-height:160px;font-family:var(--font-mono);font-size:.72rem;padding:10px;border-radius:10px;border:1px solid var(--line);background:var(--surface-2);color:var(--ink)" onclick="this.select()"></textarea>' +
+    '</div></div>';
+
+  h += '<div class="card" style="text-align:center"><p class="muted" style="font-size:.85rem;margin:0 0 12px">Progress is stored in this browser' + (fsLinked ? ' and synced to your linked file' : '') + '.</p><button class="btn ghost sm" onclick="resetAll()">Reset all progress</button></div>';
   h += '</div>';
   viewEl.innerHTML = h;
+  if (fsSupported && !fsHandle) { idbGet(FS_KEY).then(h2 => { if (h2 && !fsHandle) { fsHandle = h2; if (route.view === "progress") go("progress"); } }).catch(() => {}); }
 }
 function resetAll() { if (confirm("Erase all saved progress on this device?")) { S = Object.assign({}, DEFAULT); save(); go("home"); } }
 
