@@ -654,10 +654,33 @@ function poolFor(scope) {
 }
 function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
 function priorityScore(q) { const a = aStat(q.id); if (!a.seen) return -1; return a.correct / a.seen; }
+// Uniform random sampling from a flat pool can skip whole topics by chance in a short batch (26 topics,
+// a 10-question "all" batch has decent odds of missing a whole domain). Round-robin across topics instead —
+// one question per topic per round, topics and each topic's own questions independently shuffled — so
+// coverage spreads as evenly as possible, and every topic in scope is touched once n reaches the topic count.
+function stratifiedSample(pool, n) {
+  if (n >= pool.length) return shuffle(pool.slice());
+  const byTopic = {};
+  pool.forEach(q => (byTopic[q.topicId] = byTopic[q.topicId] || []).push(q));
+  const topicIds = shuffle(Object.keys(byTopic));
+  topicIds.forEach(tid => shuffle(byTopic[tid]));
+  const picked = [];
+  for (let round = 0; picked.length < n; round++) {
+    let addedThisRound = false;
+    for (const tid of topicIds) {
+      if (picked.length >= n) break;
+      const q = byTopic[tid][round];
+      if (q) { picked.push(q); addedThisRound = true; }
+    }
+    if (!addedThisRound) break; // pool exhausted
+  }
+  return shuffle(picked);
+}
 function startQuiz(scope, count, focusWeak) {
-  let qs = shuffle(poolFor(scope));
+  const pool = poolFor(scope);
+  const n = count === "all" ? pool.length : Math.min(parseInt(count, 10), pool.length);
+  let qs = stratifiedSample(pool, n);
   if (focusWeak) qs.sort((a, b) => priorityScore(a) - priorityScore(b));
-  const n = count === "all" ? qs.length : Math.min(parseInt(count, 10), qs.length);
   quiz = { ids: qs.slice(0, n).map(q => q.id), idx: 0, picks: {}, graded: {}, correct: 0 };
   go("practice");
 }
