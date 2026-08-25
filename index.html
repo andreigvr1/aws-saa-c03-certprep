@@ -296,7 +296,7 @@ const PACK = {"domains":[{"id":"d1","name":"Design Secure Architectures","weight
 
 /* ------------------------------------------------------------------ state */
 const SKEY = "certprep.saa.v1";
-const DEFAULT = { attempts: {}, reviewed: {}, lastScope: "all", lastCount: "20", focusWeak: false, fsLastSync: null };
+const DEFAULT = { attempts: {}, reviewed: {}, lastScope: "all", lastCount: "20", focusWeak: false, fsLastSync: null, fsLastError: null };
 let S = load();
 function load() { try { return Object.assign({}, DEFAULT, JSON.parse(localStorage.getItem(SKEY) || "{}")); } catch { return Object.assign({}, DEFAULT); } }
 function persistLocal() { try { localStorage.setItem(SKEY, JSON.stringify(S)); } catch {} }
@@ -484,14 +484,24 @@ async function syncLocalFile(silent) {
   if (!fsHandle) { try { fsHandle = await idbGet(FS_KEY); } catch {} }
   if (!fsHandle) return false;
   try {
-    if (!(await ensureFilePermission(fsHandle))) return false;
+    if (!(await ensureFilePermission(fsHandle))) {
+      S.fsLastError = "Permission not granted — click \"Sync now\" and allow the prompt.";
+      persistLocal();
+      if (!silent && route.view === "progress") go("progress");
+      return false;
+    }
     const writable = await fsHandle.createWritable();
     await writable.write(JSON.stringify(buildClaudeReport(), null, 2));
     await writable.close();
-    S.fsLastSync = Date.now(); persistLocal();
+    S.fsLastSync = Date.now(); S.fsLastError = null; persistLocal();
     if (!silent && route.view === "progress") go("progress");
     return true;
-  } catch (e) { return false; }
+  } catch (e) {
+    S.fsLastError = (e && e.message) ? e.message : String(e);
+    persistLocal();
+    if (!silent && route.view === "progress") go("progress");
+    return false;
+  }
 }
 (async function initLocalFileLink() {
   if (!fsSyncSupported()) return;
@@ -501,6 +511,10 @@ async function syncLocalFile(silent) {
 /* ------------------------------------------------------------------ tiny markdown */
 function esc(s) { return String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
 function inline(s) { return esc(s).replace(/`([^`]+)`/g, '<code class="inline">$1</code>').replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>"); }
+// Some explanations run every distractor's rationale together inline ("...allowing access. - B: Cross-Region
+// Replication would... - C: Cross-account access... - D: Intelligent-Tiering..."). Break each "- X:" marker onto
+// its own paragraph so per-option reasoning reads as separate blocks instead of one dense run-on paragraph.
+function explainMd(text) { return md(String(text).replace(/([.!?])\s+-\s+([A-E]):\s+/g, "$1\n\n**$2:** ")); }
 function md(text) {
   const blocks = String(text).split(/\n\n+/); let html = "";
   for (const b of blocks) {
@@ -683,7 +697,7 @@ function renderQuiz() {
     const cmp = q.confusableId ? (PACK.comparisons || []).find(c => c.id === q.confusableId) : null;
     h += '<div class="explain"><div class="verdict ' + (ok ? "ok" : "no") + '">' + (ok ? "✓ Correct" : "✕ Not quite") + '</div>';
     if (q.inShort) h += '<div class="inshort" style="margin-bottom:12px"><span class="lbl">In short</span><span>' + inline(q.inShort) + '</span></div>';
-    h += '<div class="prose">' + md(q.explanation) + '</div>';
+    h += '<div class="prose">' + explainMd(q.explanation) + '</div>';
     if (q.trap) h += '<div class="trap"><span class="lbl">The trap</span><span>' + inline(q.trap) + '</span></div>';
     if (q.references && q.references.length) {
       h += '<div class="refs"><span class="eyebrow">References</span>' + q.references.map(r => '<span class="ref">' + esc(r) + '</span>').join("") + '</div>';
@@ -969,6 +983,7 @@ function renderProgress() {
     '<p class="muted" style="font-size:.88rem;margin:10px 0 12px">Link a local JSON file once and every answer you submit is written straight to it — Claude can read your test history directly from disk any time, no copy/paste needed. Needs desktop Chrome or Edge in a normal tab (the GitHub Pages link, or a locally-served copy) — this does not work inside the Claude artifact view.</p>' +
     (fsLinked
       ? '<p style="font-size:.85rem;margin:0 0 10px">Linked to <code class="inline">' + esc(fsName) + '</code>' + (S.fsLastSync ? ' · last synced ' + new Date(S.fsLastSync).toLocaleTimeString() : ' · not yet synced') + '</p>' +
+        (S.fsLastError ? '<p style="font-size:.83rem;margin:0 0 10px;color:var(--bad)">⚠ Last sync failed: ' + esc(S.fsLastError) + '</p>' : '') +
         '<div class="btn-row"><button class="btn sm" onclick="syncLocalFile()">Sync now</button><button class="btn ghost sm" onclick="unlinkLocalFile()">Unlink</button></div>'
       : fsSupported
         ? '<button class="btn sm" onclick="linkLocalFile()">Link a local file…</button>'
