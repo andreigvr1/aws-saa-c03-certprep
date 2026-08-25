@@ -697,7 +697,7 @@ function renderQuiz() {
     '<span class="pill" style="border-color:color-mix(in srgb,var(--dc) 40%,var(--line));color:var(--dc)"><span class="dot" style="background:var(--dc)"></span>' + esc(d.name.replace("Design ", "")) + '</span>' +
     '<span class="chip">' + esc(t.name) + '</span>' +
     '<span class="chip">' + diffLabel + '</span>' +
-    (q.type === "multi" ? '<span class="chip" style="color:var(--accent)">Choose ' + need + '</span>' : "") +
+    (q.type === "multi" ? '<span class="chip" style="color:var(--accent)">Choose ' + need + (graded ? "" : " (" + picks.length + " selected)") + '</span>' : "") +
     '<span class="spacer"></span><span class="muted" style="font-size:.82rem;font-variant-numeric:tabular-nums">' + (quiz.idx + 1) + ' / ' + quiz.ids.length + '</span>' +
   '</div>';
   h += '<div class="progress-line"><span style="width:' + ((quiz.idx) / quiz.ids.length * 100) + '%"></span></div>';
@@ -730,7 +730,8 @@ function renderQuiz() {
       (cmp ? '<button class="btn" onclick="go(\'confusables\',{cmp:\'' + cmp.id + '\'})">Compare: ' + esc(cmp.title) + '</button>' : "") +
       '<button class="btn ghost" onclick="go(\'learn\',{topic:\'' + q.topicId + '\'})">Read the topic</button></div>';
   } else {
-    h += '<div class="btn-row" style="margin-top:16px"><button class="btn primary" id="submitBtn"' + (picks.length ? "" : " disabled") + '>Submit</button>' +
+    const readyToSubmit = q.type === "multi" ? picks.length === need : picks.length > 0;
+    h += '<div class="btn-row" style="margin-top:16px"><button class="btn primary" id="submitBtn"' + (readyToSubmit ? "" : " disabled") + '>Submit</button>' +
       '<button class="btn ghost" onclick="quitQuiz()">End set</button></div>';
   }
   h += '</div></div>';
