@@ -296,7 +296,7 @@ const PACK = {"domains":[{"id":"d1","name":"Design Secure Architectures","weight
 
 /* ------------------------------------------------------------------ state */
 const SKEY = "certprep.saa.v1";
-const DEFAULT = { attempts: {}, reviewed: {}, lastScope: "all", lastCount: "20", focusWeak: false, fsLastSync: null, fsLastError: null };
+const DEFAULT = { attempts: {}, reviewed: {}, lastScope: "all", lastCount: "20", focusWeak: false, fsLastSync: null, fsLastError: null, examDate: null };
 let S = load();
 function load() { try { return Object.assign({}, DEFAULT, JSON.parse(localStorage.getItem(SKEY) || "{}")); } catch { return Object.assign({}, DEFAULT); } }
 function persistLocal() { try { localStorage.setItem(SKEY, JSON.stringify(S)); } catch {} }
@@ -372,11 +372,16 @@ function missedQuestions() {
     .filter(x => x.a.seen > 0 && x.a.correct < x.a.seen)
     .sort((x, y) => (x.a.correct / x.a.seen) - (y.a.correct / y.a.seen));
 }
+function dueForReviewCount() {
+  const now = Date.now();
+  return PACK.questions.filter(q => { const a = aStat(q.id); return a.seen > 0 && dueScore(q) <= now; }).length;
+}
 function buildClaudeReport() {
   return {
     generatedAt: new Date().toISOString(),
     pack: { id: PACK.id, version: PACK.version },
-    overall: { questionsSeen: totalSeen(), totalQuestions: PACK.questions.length, accuracy: overallAcc(), totalAnswers: totalAttempts() },
+    examDate: S.examDate || null,
+    overall: { questionsSeen: totalSeen(), totalQuestions: PACK.questions.length, accuracy: overallAcc(), totalAnswers: totalAttempts(), dueForReviewNow: dueForReviewCount() },
     byDomain: PACK.domains.map(d => ({
       id: d.id, name: d.name, weightPct: d.weight, accuracy: domainAcc(d.id),
       seen: seenCount(qsByDomain[d.id] || []), total: (qsByDomain[d.id] || []).length
@@ -392,6 +397,7 @@ function buildClaudeReport() {
     currentlyMissedQuestions: missedQuestions().map(x => ({
       id: x.q.id, domainId: x.q.domainId, topicId: x.q.topicId, confusableId: x.q.confusableId || null,
       tags: x.q.tags || [], timesSeen: x.a.seen, timesCorrect: x.a.correct,
+      box: x.a.box || 0, streak: x.a.streak || 0, confidentMissPending: !!x.a.forceDueAt,
       stem: x.q.stem.length > 240 ? x.q.stem.slice(0, 240) + "…" : x.q.stem
     })),
   };
@@ -653,7 +659,41 @@ function poolFor(scope) {
   return (qsByDomain[scope] || []).slice();
 }
 function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
-function priorityScore(q) { const a = aStat(q.id); if (!a.seen) return -1; return a.correct / a.seen; }
+// Leitner-style spaced scheduling: a correct answer promotes a question to a longer review box,
+// a wrong answer drops it straight back to box 0. Unseen questions are always most due (-Infinity).
+// Jitter avoids a whole batch answered together all coming due on the exact same future day.
+// If an exam date is set, intervals compress toward it (Cepeda et al.'s ~10-20%-of-retention-window spacing).
+const LEITNER_DAYS = [0, 1, 2, 4, 7, 14, 30, 60];
+function examScale() {
+  if (!S.examDate) return 1;
+  const daysLeft = (new Date(S.examDate).getTime() - Date.now()) / 86400000;
+  if (!(daysLeft > 0)) return 1;
+  return Math.max(0.15, Math.min(1, daysLeft / 60));
+}
+function dueScore(q) {
+  const a = aStat(q.id);
+  if (!a.seen) return -Infinity;
+  const box = Math.min(a.box || 0, LEITNER_DAYS.length - 1);
+  const jitter = 0.9 + Math.random() * 0.2;
+  let dueAt = (a.ts || 0) + LEITNER_DAYS[box] * 86400000 * examScale() * jitter;
+  if (a.forceDueAt) dueAt = Math.min(dueAt, a.forceDueAt);
+  return dueAt;
+}
+// Interleaving confusable-linked questions (S3 vs EFS, ALB vs NLB, etc.) close together but not
+// back-to-back builds the discrimination the exam actually tests — better than leaving it to chance
+// (which usually means "never near each other") or a hard sort (which reads as one obvious topic block).
+function interleaveConfusables(qs) {
+  const arr = qs.slice();
+  const byCluster = {};
+  qs.forEach(q => { if (q.confusableId) (byCluster[q.confusableId] = byCluster[q.confusableId] || []).push(q); });
+  Object.values(byCluster).forEach(members => {
+    if (members.length < 2) return;
+    const anchor = Math.min(arr.indexOf(members[0]), arr.length);
+    members.forEach(m => { const idx = arr.indexOf(m); if (idx >= 0) arr.splice(idx, 1); });
+    members.forEach((m, i) => { const pos = Math.min(anchor + i * 3, arr.length); arr.splice(pos, 0, m); });
+  });
+  return arr;
+}
 // Uniform random sampling from a flat pool can skip whole topics by chance in a short batch (26 topics,
 // a 10-question "all" batch has decent odds of missing a whole domain). Round-robin across topics instead —
 // one question per topic per round, topics and each topic's own questions independently shuffled — so
@@ -680,7 +720,8 @@ function startQuiz(scope, count, focusWeak) {
   const pool = poolFor(scope);
   const n = count === "all" ? pool.length : Math.min(parseInt(count, 10), pool.length);
   let qs = stratifiedSample(pool, n);
-  if (focusWeak) qs.sort((a, b) => priorityScore(a) - priorityScore(b));
+  if (focusWeak) qs.sort((a, b) => dueScore(a) - dueScore(b));
+  qs = interleaveConfusables(qs);
   quiz = { ids: qs.slice(0, n).map(q => q.id), idx: 0, picks: {}, graded: {}, correct: 0 };
   go("practice");
 }
@@ -718,10 +759,27 @@ function renderQuiz() {
   if (graded) {
     const ok = arrEq(picks.slice().sort(), q.correct.slice().sort());
     const cmp = q.confusableId ? (PACK.comparisons || []).find(c => c.id === q.confusableId) : null;
+    const confidentMiss = quiz.confidentMiss && quiz.confidentMiss[q.id];
+    const streakAfter = quiz.streakAfter ? quiz.streakAfter[q.id] : undefined;
     h += '<div class="explain"><div class="verdict ' + (ok ? "ok" : "no") + '">' + (ok ? "✓ Correct" : "✕ Not quite") + '</div>';
-    if (q.inShort) h += '<div class="inshort" style="margin-bottom:12px"><span class="lbl">In short</span><span>' + inline(q.inShort) + '</span></div>';
-    h += '<div class="prose">' + explainMd(q.explanation) + '</div>';
-    if (q.trap) h += '<div class="trap"><span class="lbl">The trap</span><span>' + inline(q.trap) + '</span></div>';
+    if (confidentMiss) {
+      h += '<div class="trap" style="margin:0 0 12px"><span class="lbl">Worth a second look</span><span>You had this right before — this is the one to actually fix, not just note. Re-check tomorrow.</span></div>';
+    } else if (ok && streakAfter >= 2) {
+      h += '<p class="muted" style="font-size:.82rem;margin:0 0 10px">Correct ' + streakAfter + 'x in a row.</p>';
+    } else if (ok && streakAfter === 1) {
+      h += '<p class="muted" style="font-size:.82rem;margin:0 0 10px">First time getting this one right — worth seeing again before calling it learned.</p>';
+    }
+    // Feedback after a wrong answer is where the evidence says almost all the retention benefit lives —
+    // lead with the trap/concept there. Feedback after a correct answer barely moves retention, so keep
+    // it out of the way by default (collapsed) rather than making the user scroll past it every time.
+    if (!ok && q.trap) h += '<div class="trap"><span class="lbl">The trap</span><span>' + inline(q.trap) + '</span></div>';
+    if (q.inShort) h += '<div class="inshort" style="margin:12px 0"><span class="lbl">In short</span><span>' + inline(q.inShort) + '</span></div>';
+    if (ok) {
+      h += '<details style="margin-top:4px"><summary style="cursor:pointer;font-weight:650;font-size:.9rem;color:var(--ink-2)">Why (explanation)</summary><div class="prose" style="margin-top:10px">' + explainMd(q.explanation) + '</div></details>';
+    } else {
+      h += '<div class="prose">' + explainMd(q.explanation) + '</div>';
+      if (q.trap) { /* already shown above the fold for wrong answers */ }
+    }
     if (q.references && q.references.length) {
       h += '<div class="refs"><span class="eyebrow">References</span>' + q.references.map(r => '<span class="ref">' + esc(r) + '</span>').join("") + '</div>';
     }
@@ -753,7 +811,17 @@ function grade(qid) {
   const ok = arrEq(picks.slice().sort(), q.correct.slice().sort());
   if (ok) quiz.correct++;
   const a = S.attempts[qid] || { seen: 0, correct: 0 };
-  a.seen++; if (ok) a.correct++; a.ts = Date.now(); S.attempts[qid] = a; save();
+  // A miss after 2+ correct in a row is a "confidently wrong" moment — corrected feedback on these
+  // sticks far better than on an unsure miss (hypercorrection effect), so flag it and force a next-day
+  // recheck regardless of where Leitner spacing would otherwise have put it.
+  const confidentMiss = !ok && (a.streak || 0) >= 2;
+  a.seen++; if (ok) a.correct++;
+  a.box = ok ? Math.min((a.box || 0) + 1, LEITNER_DAYS.length - 1) : 0;
+  a.streak = ok ? (a.streak || 0) + 1 : 0;
+  if (confidentMiss) a.forceDueAt = Date.now() + 86400000; else delete a.forceDueAt;
+  a.ts = Date.now(); S.attempts[qid] = a; save();
+  quiz.confidentMiss = quiz.confidentMiss || {}; quiz.confidentMiss[qid] = confidentMiss;
+  quiz.streakAfter = quiz.streakAfter || {}; quiz.streakAfter[qid] = a.streak;
   renderQuiz();
 }
 function next() { quiz.idx++; if (quiz.idx >= quiz.ids.length) renderResults(); else renderQuiz(); }
@@ -993,6 +1061,11 @@ function renderProgress() {
       tile(totalSeen() + '<span class="muted" style="font-size:1rem">/' + PACK.questions.length + '</span>', "Questions seen") +
       tile(oa === null ? "—" : pct(oa), "Overall accuracy") +
       tile(totalAttempts(), "Total answers") +
+    '</div>' +
+    '<div style="margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
+      '<label class="muted" style="font-size:.82rem" for="examDateInput">Exam date</label>' +
+      '<input type="date" id="examDateInput" value="' + (S.examDate || '') + '" style="padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:var(--surface-2);color:var(--ink);font:inherit" onchange="S.examDate=this.value||null;save();">' +
+      (S.examDate ? '<span class="muted" style="font-size:.82rem">reviews compress as it gets closer</span>' : '<span class="muted" style="font-size:.82rem">set it to tighten spaced-review timing</span>') +
     '</div></div>';
 
   h += '<div class="card"><div class="eyebrow">By domain</div><div style="margin-top:10px">';
